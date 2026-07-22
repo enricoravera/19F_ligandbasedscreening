@@ -648,7 +648,7 @@ def workflow_titration(
                 Lf = L_tot  # approximation
                 return R2_free + n_sites * P_tot * (R2_b - R2_free) / (KD + Lf)
             fit_kwargs: dict = dict(
-                p0=[500.0, R2_free * 10],
+                p0=[500.0, R2_free * 10],   # KD initial guess 500 µM; R2_b guess 10× free
                 bounds=([0.01, R2_free], [1e5, R2_free * 1000]),
                 maxfev=10000,
             )
@@ -889,6 +889,9 @@ def _parse_compound(name: str, cfg: dict) -> CompoundData:
     # R2_err sub-table: 1σ uncertainties, same structure as R2.
     # len==2  → 2-tuple (σ_free, σ_protein) for CSAR / FastCSAR.
     # len!=2  → list [σ_P0, σ_P1, …] for titration (one per concentration).
+    # This mirrors the identical disambiguation used above for R2, and is
+    # intentional: a titration with exactly 2 protein concentrations cannot
+    # be distinguished from a free/protein pair — use ≥ 3 concentrations.
     for B_str, val in cfg.get("R2_err", {}).items():
         B = float(B_str)
         if isinstance(val, list) and len(val) == 2:
