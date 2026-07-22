@@ -37,7 +37,7 @@ import tomllib
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from scipy.optimize import curve_fit
@@ -200,9 +200,12 @@ class CompoundData:
     relaxation_data: Dict[float, Tuple[np.ndarray, np.ndarray, np.ndarray]] = field(default_factory=dict)
     # Pre-fitted R2 values: dict mapping field -> (R2_free, R2_protein)
     R2_fitted: Dict[float, Tuple[float, float]] = field(default_factory=dict)
-    # 1σ uncertainties on R2_fitted, same keys: (σ_R2_free, σ_R2_protein)
+    # 1σ uncertainties on R2_fitted, same keys.
+    # For CSAR / FastCSAR: (σ_R2_free, σ_R2_protein) — 2-tuple.
+    # For titration: [σ_R2_P0, σ_R2_P1, …] — list, one per protein
+    #   concentration, matching the order of protein_concentrations.
     # nan entries mean the uncertainty was not estimated.
-    R2_err: Dict[float, Tuple[float, float]] = field(default_factory=dict)
+    R2_err: Dict[float, Union[Tuple[float, float], List[float]]] = field(default_factory=dict)
     # For reporter workflow: reporter signal intensity (−protein, +protein)
     reporter_signal_minus: Optional[float] = None
     reporter_signal_plus: Optional[float] = None
@@ -546,12 +549,22 @@ def workflow_titration(
     Alternatively, if R2_fitted[B] is a list of (R2_free, R2_prot) tuples
     per protein concentration, those are used directly.
 
+    Per-concentration R2 uncertainties are used when available: if
+    ``c.R2_err[B]`` is a list of σ_R2 values (one per concentration,
+    matching the order of ``protein_concentrations``), they are shown as
+    error bars in the binding isotherm figure and, when all values are
+    finite and positive, they are passed as ``sigma`` weights to the KD
+    fit via ``scipy.optimize.curve_fit`` (absolute_sigma=True).  If
+    uncertainties are missing or invalid the plot falls back to a plain
+    scatter and the fit uses unweighted least-squares.
+
     Parameters
     ----------
     compounds : list of CompoundData
         relaxation_data[B] should be a list of (delays, intensities) arrays,
         one per protein concentration.  Or R2_fitted[B] = list of R2 values
-        at each [P].
+        at each [P].  Per-concentration 1σ uncertainties may optionally be
+        stored in R2_err[B] as a list of the same length.
     B : float
         Magnetic field in Tesla.
     protein_concentrations : array-like
@@ -599,6 +612,23 @@ def workflow_titration(
             warnings.warn(f"Compound {c.name}: titration data not found — skipping.")
             continue
 
+        # Collect per-concentration R2 uncertainties if available.
+        # A list of matching length is used for error bars; additionally,
+        # all values must be finite and positive for the weighted KD fit.
+        R2_err_raw = c.R2_err.get(B)
+        R2_err_vals: Optional[np.ndarray] = None
+        if isinstance(R2_err_raw, list) and len(R2_err_raw) == len(R2_vals):
+            R2_err_vals = np.array(R2_err_raw, dtype=float)
+        # Separate flag: are the uncertainties usable as curve_fit sigma?
+        # Requires all entries to be strictly positive and finite —
+        # non-positive or NaN values would produce infinite weights and
+        # break the optimiser. Fall back to unweighted if any are bad.
+        use_weighted_fit = (
+            R2_err_vals is not None
+            and bool(np.all(np.isfinite(R2_err_vals)))
+            and bool(np.all(R2_err_vals > 0))
+        )
+
         R2_free = R2_vals[0] if prot_arr[0] == 0.0 else R2_vals.min()
 
         # --- Ranking by slope (R2 / [P]) as in the paper ---
@@ -617,13 +647,18 @@ def workflow_titration(
             def titration_eq(P_tot, KD, R2_b):
                 Lf = L_tot  # approximation
                 return R2_free + n_sites * P_tot * (R2_b - R2_free) / (KD + Lf)
+            fit_kwargs: dict = dict(
+                p0=[500.0, R2_free * 10],   # KD initial guess 500 µM; R2_b guess 10× free
+                bounds=([0.01, R2_free], [1e5, R2_free * 1000]),
+                maxfev=10000,
+            )
+            if use_weighted_fit:
+                # Weight each point by 1/σ² — passes measurement uncertainties
+                # to the optimiser so the fit is properly uncertainty-weighted.
+                fit_kwargs["sigma"] = R2_err_vals
+                fit_kwargs["absolute_sigma"] = True
             try:
-                popt, pcov = curve_fit(
-                    titration_eq, prot_arr, R2_vals,
-                    p0=[500.0, R2_free * 10],
-                    bounds=([0.01, R2_free], [1e5, R2_free * 1000]),
-                    maxfev=10000,
-                )
+                popt, pcov = curve_fit(titration_eq, prot_arr, R2_vals, **fit_kwargs)
                 fitted_KD  = popt[0]
                 fitted_R2b = popt[1]
                 KD_fits.append(fitted_KD)
@@ -633,7 +668,17 @@ def workflow_titration(
 
         # --- Binding isotherm figure ---
         fig_iso, ax_iso = plt.subplots(figsize=(5, 4))
-        ax_iso.scatter(prot_arr, R2_vals, color="royalblue", zorder=3, label="Data")
+        if R2_err_vals is not None:
+            # Error bars from per-concentration R2 uncertainties.
+            # matplotlib tolerates NaN in yerr (those caps are simply not drawn).
+            ax_iso.errorbar(
+                prot_arr, R2_vals, yerr=R2_err_vals,
+                fmt="o", color="royalblue", zorder=3,
+                capsize=3, capthick=1, elinewidth=1,
+                label="Data",
+            )
+        else:
+            ax_iso.scatter(prot_arr, R2_vals, color="royalblue", zorder=3, label="Data")
         title_iso = f"{c.name}  |  B = {B:.4g} T"
         if fit_KD and not np.isnan(fitted_KD):
             P_dense = np.linspace(prot_arr.min(), prot_arr.max(), 300)
@@ -811,6 +856,14 @@ def _parse_compound(name: str, cfg: dict) -> CompoundData:
     * ``[R2_free, R2_protein]``  — two-element list for CSAR / FastCSAR
     * ``[R2_0, R2_1, ...]``      — one value per protein concentration for titration
 
+    R2_err values (1σ uncertainties) live in ``[compound.NAME.R2_err]``, keyed
+    the same way.  The disambiguation mirrors R2:
+
+    * ``[σ_free, σ_protein]``  — exactly two elements → stored as a 2-tuple
+      (CSAR / FastCSAR behaviour, unchanged)
+    * ``[σ_P0, σ_P1, ...]``    — any other length → stored as a list, one
+      σ per protein concentration (titration)
+
     FastCSAR can alternatively be driven off raw delay/intensity arrays
     instead of a pre-fitted R2 — those live in a separate
     ``[compound.NAME.relaxation_data]`` sub-table (as written by
@@ -833,11 +886,19 @@ def _parse_compound(name: str, cfg: dict) -> CompoundData:
         elif isinstance(val, list):
             # Titration: one R2 per protein concentration
             c.R2_fitted[B] = [float(v) for v in val]
-    # R2_err sub-table: 1σ uncertainties, same structure as R2
+    # R2_err sub-table: 1σ uncertainties, same structure as R2.
+    # len==2  → 2-tuple (σ_free, σ_protein) for CSAR / FastCSAR.
+    # len!=2  → list [σ_P0, σ_P1, …] for titration (one per concentration).
+    # This mirrors the identical disambiguation used above for R2, and is
+    # intentional: a titration with exactly 2 protein concentrations cannot
+    # be distinguished from a free/protein pair — use ≥ 3 concentrations.
     for B_str, val in cfg.get("R2_err", {}).items():
         B = float(B_str)
-        if isinstance(val, list) and len(val) >= 2:
+        if isinstance(val, list) and len(val) == 2:
             c.R2_err[B] = (float(val[0]), float(val[1]))
+        elif isinstance(val, list):
+            # Titration: one σ_R2 per protein concentration
+            c.R2_err[B] = [float(v) for v in val]
     # relaxation_data sub-table: raw delay/intensity arrays for FastCSAR's
     # point-ratio path (used when no R2 was fitted for this field). Each
     # entry stores delays_free and delays_protein separately, but
