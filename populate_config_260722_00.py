@@ -44,7 +44,7 @@ import lmfit
 import numpy as np
 try:
     import klassez as kz
-    from f_fit import fit_exponential, fit_exponential_Jmod, extract_R2_uncertainty, plot_exponential_fit
+    from f_fit import fit_exponential, fit_exponential_Jmod, extract_R2_uncertainty, plot_exponential_fit, filter_outliers_fit_R2
 except ImportError:
     kz = None   # klassez / f_fit not installed; fitting functions unavailable
 
@@ -289,6 +289,28 @@ def collect_paths(
     # Snapshot the file once before we start writing to it incrementally.
     if compound_names:
         _backup(Path(config_path))
+
+    # For csar and fastcsar, resolve the protein concentration once, up
+    # front — it is used to namespace the output directory and to label
+    # figures with the experimental condition.
+    if workflow in ("csar", "fastcsar"):
+        prot_conc_val = wf_cfg.get("protein_concentration", None)
+        if prot_conc_val is None:
+            print("  'protein_concentration' not found in the [workflow] section.")
+            conc_input = input("  Enter protein concentration (µM): ").strip()
+            try:
+                prot_conc_val = float(conc_input)
+            except ValueError:
+                sys.exit(
+                    "No valid protein concentration provided — cannot continue "
+                    f"the {workflow} workflow."
+                )
+            wf_cfg["protein_concentration"] = prot_conc_val
+            _write_protein_concentration(config_path, prot_conc_val)
+            print()
+        else:
+            prot_conc_val = float(prot_conc_val)
+            wf_cfg["protein_concentration"] = prot_conc_val
 
     # For titration, resolve the protein-concentration list once, up front,
     # rather than per compound. If it's missing from the config, ask the
@@ -721,6 +743,27 @@ def _write_ligand_concentration(
     )
 
 
+def _write_protein_concentration(
+    config_path: str, protein_concentration: float
+) -> None:
+    """
+    Persist the protein concentration into the ``[workflow]`` section of
+    the TOML config file on disk. Used for ``csar`` and ``fastcsar``
+    workflows where a single protein concentration is present throughout.
+    See :func:`_write_toml_scalar` for the replace-or-append semantics.
+
+    Parameters
+    ----------
+    config_path : str
+    protein_concentration : float
+        Protein concentration in µM.
+    """
+    _write_toml_scalar(
+        config_path, "[workflow]", "protein_concentration",
+        f"{protein_concentration:.6g}",
+    )
+
+
 def _write_protein_concentrations(
     config_path: str, protein_concentrations: List[float]
 ) -> None:
@@ -988,21 +1031,45 @@ def _sanitize_dirname(name: str) -> str:
     return safe or "protein"
 
 
-def _basedir(protein_name: Optional[str]) -> Path:
+def _format_conc_dir(conc: float) -> str:
+    """
+    Format a protein concentration (µM) into a filesystem-safe directory
+    name fragment, e.g. ``10.0 → '10uM'``, ``10.5 → '10p5uM'``.
+
+    The decimal point is replaced with ``"p"`` (like :func:`_field_tag`
+    for field values) so the string is safe as a directory component
+    on all platforms. Used by :func:`_basedir` to embed the protein
+    concentration in the output path for ``csar``/``fastcsar`` workflows.
+
+    Must produce the *identical* string as ``csar_workflows.py``'s own
+    ``_format_conc_dir`` — see that function's docstring.
+    """
+    return f"{conc:g}".replace(".", "p") + "uM"
+
+
+def _basedir(protein_name: Optional[str], protein_concentration: Optional[float] = None) -> Path:
     """
     Return the ``fit_results`` directory to write into, namespaced by
-    protein name when one is known.
+    protein name when one is known, and further by protein concentration
+    for ``csar``/``fastcsar`` workflows.
 
     ``fit_results/`` on its own (``protein_name`` is ``None`` or empty)
     for backward compatibility with configs that predate the
     ``[workflow].protein_name`` field; ``fit_results/{protein_name}/``
-    once a protein name is available, so results from different
-    proteins run through the same working directory don't collide or
-    get mixed together. Creates the directory if it doesn't exist yet.
+    once a protein name is available; ``fit_results/{protein_name}/{conc}uM/``
+    when ``protein_concentration`` is also provided (csar/fastcsar only),
+    so results from different experimental conditions don't collide.
+
+    Creates the directory if it doesn't exist yet.
+
+    Must produce the *identical* path as ``csar_workflows.py``'s own
+    ``_basedir`` — both helpers are kept in sync deliberately.
     """
     basedir = Path("fit_results")
     if protein_name:
         basedir = basedir / _sanitize_dirname(protein_name)
+    if protein_concentration is not None:
+        basedir = basedir / _format_conc_dir(protein_concentration)
     basedir.mkdir(parents=True, exist_ok=True)
     return basedir
 
@@ -1032,7 +1099,7 @@ def _get_or_ask_protein_name(cfg: dict, config_path: str) -> str:
     return protein_name
 
 
-
+def _field_tag(field_T: float, field_index: Optional[int] = None) -> str:
     """
     Build the filename fragment that disambiguates one field point from
     another (e.g. csar's field point 1 vs. field point 2), shared by
@@ -1081,6 +1148,7 @@ def load_experiment(
     field_T: Optional[float] = None,
     field_index: Optional[int] = None,
     protein_name: Optional[str] = None,
+    protein_concentration: Optional[float] = None,
 ) -> Dict[str, object]:
     """
     Load raw experimental data from the file paths collected in step (C).
@@ -1105,6 +1173,11 @@ def load_experiment(
         Used to namespace the ``.igrl``/``.fvf``/``.ivf`` cache files
         under ``fit_results/{protein_name}/`` instead of bare
         ``fit_results/`` — see :func:`_basedir`.
+    protein_concentration : float, optional
+        Protein concentration in µM for ``csar``/``fastcsar`` workflows.
+        When provided, cache files are namespaced under
+        ``fit_results/{protein_name}/{conc}uM/`` — matching the directory
+        used by :func:`fit_experiment` for the same run.
 
     Returns
     -------
@@ -1134,7 +1207,10 @@ def load_experiment(
     """
     if workflow != "reporter":
         dict_of_delays_intensities = {}
-        basedir = _basedir(protein_name)
+        basedir = _basedir(
+            protein_name,
+            protein_concentration if workflow in ("csar", "fastcsar") else None,
+        )
 
         # Same collision this workflow's .inp/.png output had (see
         # _field_tag's docstring): with no field disambiguation here,
@@ -1271,6 +1347,7 @@ def _fit_free_protein_R2(
     experiment_type: str,
     basedir: Path,
     field_index: Optional[int] = None,
+    protein_concentration: Optional[float] = None,
 ) -> Tuple[list, list]:
     """
     Fit R2 (free-ligand and +protein) from a two-condition raw-data dict
@@ -1283,6 +1360,10 @@ def _fit_free_protein_R2(
     happens to the resulting R2 values downstream (csar subtracts two
     fields' worth of these; fastcsar's "r2" mode feeds a single field's
     pair straight into the analytical point-ratio formula).
+
+    Outlier masking is applied automatically via
+    :func:`filter_outliers_fit_R2` before the final fit; masked-out
+    points are shown as open red circles in the figure.
 
     Parameters
     ----------
@@ -1297,6 +1378,9 @@ def _fit_free_protein_R2(
         point 2's, so field point 1 was effectively never fit/plotted.
         Folding in ``field_index`` makes the filename collision-proof
         regardless of how ``field_T`` happens to format.
+    protein_concentration : float, optional
+        Protein concentration in µM, included in the figure suptitle
+        when provided.
 
     Returns
     -------
@@ -1306,20 +1390,29 @@ def _fit_free_protein_R2(
     tag = _field_tag(field_T, field_index)
     fig, axes = plt.subplots(1, 2, figsize=(12, 9), sharex=False, sharey=False, squeeze=False)
     axes_flat = axes.flatten()
+    use_Jmod = (experiment_type == "n")
     for condition in ('free', 'protein'):
         ax = axes_flat[0] if condition == 'free' else axes_flat[1]
         ax.set_title(f"{condition.capitalize()} ligand")
         delays, intensities = raw_data[condition]
+        delays      = np.asarray(delays,      dtype=float)
+        intensities = np.asarray(intensities, dtype=float)
         filename = basedir / f"{compound_name}_{condition}{tag}.inp"
         open(filename, 'w').write('\n'.join(f"{d:.6e} {i:.6e}" for d, i in zip(delays, intensities)))
-        if experiment_type == "s":
-            result = fit_exponential(delays, intensities, multi=1)
-        elif experiment_type == "n":
-            result = fit_exponential_Jmod(delays, intensities, multi=1)
-        plot_exponential_fit(ax, delays, intensities, result)
+        mask, result, _A, _a = filter_outliers_fit_R2(
+            delays, intensities, multi=1, use_Jmod=use_Jmod
+        )
+        plot_exponential_fit(ax, delays, intensities, result, mask=mask,
+                             experiment_type=experiment_type)
         R2, sigma_R2 = extract_R2_uncertainty(result, multi=1)
         values.append(R2)
         errors.append(sigma_R2)
+
+    # Annotate the figure with compound, field, and protein concentration.
+    title = f"{compound_name}  |  B = {field_T:.4g} T"
+    if protein_concentration is not None:
+        title += f"  |  [Protein] = {protein_concentration:.6g} µM"
+    fig.suptitle(title, fontsize=11)
 
     # Save once, after BOTH panels are drawn — saving mid-loop (once per
     # condition) meant the "free" panel had to be complete before the
@@ -1347,6 +1440,7 @@ def fit_experiment(
     fastcsar_mode: str = "raw",
     field_index: Optional[int] = None,
     protein_name: Optional[str] = None,
+    protein_concentration: Optional[float] = None,
 ) -> list:
     """
     Fit the raw experimental data and return R2 values ready for the config.
@@ -1384,6 +1478,11 @@ def fit_experiment(
         ``fit_results/`` — see :func:`_basedir`. ``csar_workflows.py``
         needs the identical namespacing to save its ranking plot
         alongside these.
+    protein_concentration : float, optional
+        Protein concentration in µM for ``csar``/``fastcsar`` workflows.
+        When provided, the output directory is further namespaced as
+        ``fit_results/{protein_name}/{conc}uM/`` and figures include the
+        concentration in their suptitle.
 
     Returns
     -------
@@ -1415,11 +1514,12 @@ def fit_experiment(
             ``errors  = [σ_R2_P0, σ_R2_P1, …]``
 
     """
-    basedir = _basedir(protein_name)
+    basedir = _basedir(protein_name, protein_concentration if workflow in ("csar", "fastcsar") else None)
     if workflow == 'csar':
         return _fit_free_protein_R2(
             raw_data, compound_name, field_T, experiment_type, basedir,
             field_index=field_index,
+            protein_concentration=protein_concentration,
         )
 
     elif workflow == 'fastcsar':
@@ -1431,6 +1531,7 @@ def fit_experiment(
             return _fit_free_protein_R2(
                 raw_data, compound_name, field_T, experiment_type, basedir,
                 field_index=field_index,
+                protein_concentration=protein_concentration,
             )
 
         delays, I_free, I_protein = [], [], []
@@ -1463,6 +1564,7 @@ def fit_experiment(
         fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * panel_w, nrows * panel_h),
                                 sharex=False, sharey=False, squeeze=False)
         axes_flat = axes.flatten()
+        use_Jmod = (experiment_type == "n")
 
         for i, conc in enumerate(protein_concentrations):
             key = f"P_{conc:.1f}uM"
@@ -1474,16 +1576,18 @@ def fit_experiment(
             ax = axes_flat[i]
             ax.set_title(f"[P] = {conc:.1f} µM")
             delays, intensities = raw_data[key]
+            delays      = np.asarray(delays,      dtype=float)
+            intensities = np.asarray(intensities, dtype=float)
             filename = basedir / (compound_name + key + '.inp')
             open(filename, 'w').write('\n'.join(f"{d:.6e} {ival:.6e}" for d, ival in zip(delays, intensities)))
-            if experiment_type == "s":
-                result = fit_exponential(delays, intensities, multi=1)
-            elif experiment_type == "n":
-                result = fit_exponential_Jmod(delays, intensities, multi=1)
+            mask, result, _A, _a = filter_outliers_fit_R2(
+                delays, intensities, multi=1, use_Jmod=use_Jmod
+            )
             print(lmfit.fit_report(result))
             R2, sigma_R2 = extract_R2_uncertainty(result, multi=1)
             print(f"    [P] = {conc:.1f} µM  →  R2 = {R2:.3f} ± {sigma_R2:.3f} s⁻¹")
-            plot_exponential_fit(ax, delays, intensities, result, experiment_type=experiment_type)
+            plot_exponential_fit(ax, delays, intensities, result, mask=mask,
+                                 experiment_type=experiment_type)
 
             values.append(R2)
             errors.append(sigma_R2)
@@ -1493,14 +1597,13 @@ def fit_experiment(
         # instead of leaving them blank with no title.
         for j in range(n, nrows * ncols):
             axes_flat[j].set_visible(False)
-        
-        #fig.tight_layout()
+
+        fig.suptitle(f"{compound_name}  |  B = {field_T:.4g} T", fontsize=11)
         figurename = basedir / str(compound_name + '_titration_fit.png')
         print(f"Saving figure to {figurename}")
-        plt.savefig(figurename, format='png', dpi=300)
+        fig.savefig(figurename, format='png', dpi=300)
         print(f"Saved figure to {figurename}")
-        plt.close()
-        plt.cla()
+        plt.close(fig)
         return values, errors
     # fit_experiment must return (values_list, uncertainties_list)
 
@@ -1540,6 +1643,14 @@ def run_fitting(
     """
     wf_cfg = cfg.get("workflow", {})
     prot_concs = [float(p) for p in wf_cfg.get("protein_concentrations", [])]
+    # Protein concentration for csar/fastcsar — collected by collect_paths
+    # and stored back into wf_cfg["protein_concentration"] (in memory) and
+    # persisted to the config file on disk.  None for reporter/titration.
+    protein_concentration: Optional[float] = (
+        float(wf_cfg["protein_concentration"])
+        if workflow in ("csar", "fastcsar") and "protein_concentration" in wf_cfg
+        else None
+    )
 
     # Resolve (and persist, if missing) the protein name — every
     # compound/field's .inp/.png output for this run goes under
@@ -1583,6 +1694,7 @@ def run_fitting(
                     condition_paths, workflow, fittingmode, ep.compound_name,
                     field_T=field_T, field_index=field_index,
                     protein_name=protein_name,
+                    protein_concentration=protein_concentration,
                 )
 
                 # (D.2) ── fit ───────────────────────────────────────────────
@@ -1602,6 +1714,7 @@ def run_fitting(
                     fastcsar_mode=fastcsar_mode or "raw",
                     field_index=field_index,
                     protein_name=protein_name,
+                    protein_concentration=protein_concentration,
                 )
                 r2_dict[field_T]      = r2_values
                 r2_err_dict[field_T]  = r2_errors
