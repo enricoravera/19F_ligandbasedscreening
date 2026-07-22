@@ -1,7 +1,10 @@
 #! /usr/bin/env python3
 
+from copy import deepcopy
+
 import numpy as np
 import lmfit
+from scipy import stats
 import klassez as kz
 
 #fitting functions from TRAGICO
@@ -457,7 +460,7 @@ def extract_R2_uncertainty(result, multi=1):
 
     return float(R2), float(sigma)
 
-def plot_exponential_fit(a, x, y, result, multi=1, experiment_type='s'):
+def plot_exponential_fit(a, x, y, result, multi=1, experiment_type='s', mask=None):
     """
     Plot the data and the fitted exponential model in the subplot that is passed to the function. The fitted model is computed using the parameters from the lmfit result.
 
@@ -473,15 +476,118 @@ def plot_exponential_fit(a, x, y, result, multi=1, experiment_type='s'):
         The result of the least squares optimization.
     multi : int, optional
         The multiplicity of the exponential model (1, 2, or 3). Default is 1.
+    experiment_type : str, optional
+        ``'s'`` for selective (plain exponential) or ``'n'`` for non-selective
+        (J-modulated exponential). Default is ``'s'``.
+    mask : array_like of bool, optional
+        Boolean mask of the same length as ``x`` and ``y``.  If provided,
+        points where ``mask`` is ``True`` are plotted as filled blue circles
+        ("inliers") and points where it is ``False`` are plotted as open red
+        circles ("outliers excluded from fit").  If ``None`` (default), all
+        points are plotted uniformly.
     """
+    x = np.asarray(x)
+    y = np.asarray(y)
 
     # Generate model data using the fitted parameters
     if experiment_type == 's':
         model = exponential_ls(result.params, x, y, multi=multi, result=True)[0]
     elif experiment_type == 'n':
         model = exponential_ls_Jmod(result.params, x, y, multi=multi, result=True)[0]
-    
-    a.plot(x, y, 'bo', label='Data')
+
+    if mask is not None:
+        mask = np.asarray(mask, dtype=bool)
+        a.plot(x[mask],  y[mask],  'bo', label='Data')
+        if np.any(~mask):
+            a.plot(x[~mask], y[~mask], 'ro', mfc='none', label='Outliers')
+    else:
+        a.plot(x, y, 'bo', label='Data')
     a.plot(x, model, 'r-', label='Fitted Model')
     a.set_xlabel('delay (s)')
     a.set_ylabel('intensity (a.u.)')
+
+# ---------------------------------------------------------------------------
+# Outlier-robust exponential fitting
+# ---------------------------------------------------------------------------
+
+def filter_outliers_fit_R2(x, y, multi=1, zthresh=2.0, max_iter=5, use_Jmod=False):
+    """
+    Outlier-robust exponential fit using iterative sigma-clipping (z-score
+    thresholding).
+
+    Fits an exponential model to ``(x, y)``, computes residuals, masks
+    points whose z-score exceeds ``zthresh``, re-fits on the remaining
+    points, and repeats until the mask stabilises or ``max_iter`` is
+    reached.  Adapted from the TRAGICO ``filter_outliers_fit_T1`` routine.
+
+    Parameters
+    ----------
+    x : 1-D array_like
+        Independent variable (e.g. relaxation delays in seconds).
+    y : 1-D array_like
+        Experimental data (e.g. signal intensities).
+    multi : int, optional
+        Multiplicity of the exponential model (1, 2, or 3). Default is 1.
+    zthresh : float, optional
+        Z-score threshold above which a point is classified as an outlier.
+        Default is 2.0.
+    max_iter : int, optional
+        Maximum number of sigma-clipping iterations. Default is 5.
+    use_Jmod : bool, optional
+        If ``True``, use the J-modulated exponential model
+        (:func:`fit_exponential_Jmod` / :func:`exponential_ls_Jmod`);
+        otherwise use the plain exponential (:func:`fit_exponential` /
+        :func:`exponential_ls`). Default is ``False``.
+
+    Returns
+    -------
+    mask : ndarray of bool
+        Boolean mask of the same length as ``x``/``y``.  ``True`` = inlier
+        (point was retained in the final fit); ``False`` = outlier (excluded
+        by sigma-clipping).
+    result : lmfit.MinimizerResult
+        lmfit result object from the final iteration fit on the masked data.
+    A : float
+        Optimal amplitude scaling factor (linear parameter in the LS sense,
+        computed inside the residual function).
+    a : float
+        Optimal offset (linear parameter, same source).
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    ls_func    = exponential_ls_Jmod if use_Jmod else exponential_ls
+    model_func = expontential_model_Jmod if use_Jmod else exponential_model
+    fit_func   = fit_exponential_Jmod   if use_Jmod else fit_exponential
+
+    def _do_fit(x_m, y_m):
+        return fit_func(x_m, y_m, multi=multi)
+
+    # Start with all points included
+    mask = np.ones(len(y), dtype=bool)
+
+    result = _do_fit(x[mask], y[mask])
+
+    for _ in range(max_iter):
+        result = _do_fit(x[mask], y[mask])
+        # Linear parameters (A, a) evaluated on the masked subset
+        _, A, a = ls_func(result.params, x[mask], y[mask], multi=multi, result=True)
+        # Model evaluated at ALL x (including masked-out points) for residuals
+        y_fit = model_func(result.params, x, multi=multi, A=A, a=a)
+        residual = y - y_fit
+        # Set previously-masked points to NaN so they don't enter z-score
+        residual[~mask] = np.nan
+        zscore = np.abs(stats.zscore(residual, nan_policy='omit'))
+        new_mask = zscore < zthresh
+        # Stop if too few points remain (need at least n_params + 2)
+        n_params = len(result.params.valuesdict())
+        if np.sum(new_mask.astype(int)) < n_params + 2:
+            break
+        # Stop if the mask did not change
+        if np.array_equal(new_mask, mask):
+            break
+        mask = new_mask
+
+    # Re-extract A and a from the final mask for the caller
+    _, A, a = ls_func(result.params, x[mask], y[mask], multi=multi, result=True)
+    return mask, result, A, a

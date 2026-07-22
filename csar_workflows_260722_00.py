@@ -535,6 +535,7 @@ def workflow_titration(
     nucleus: str = "19F",
     n_sites: int = 1,
     fit_KD: bool = False,
+    protein_name: Optional[str] = None,
 ) -> WorkflowResult:
     """
     Exchange-suppressed ligand-observed titration (Fig. 8, Rüdisser 2020).
@@ -566,6 +567,10 @@ def workflow_titration(
     fit_KD : bool
         If True, attempt to fit KD from Eq. 12.  This is ill-conditioned
         for weak binders (see Discussion) — a warning is emitted.
+    protein_name : str, optional
+        Used to namespace the binding isotherm figures under
+        ``fit_results/{protein_name}/`` — same convention as the per-compound
+        fit figures produced by ``populate_config.py``.
 
     Returns
     -------
@@ -575,6 +580,7 @@ def workflow_titration(
     """
     prot_arr = np.asarray(protein_concentrations, dtype=float)  # µM
     L_tot = ligand_concentration   # µM
+    basedir = _basedir(protein_name)
 
     names, slopes, KD_fits = [], [], []
     notes = []
@@ -601,6 +607,10 @@ def workflow_titration(
         names.append(c.name)
         slopes.append(slope)
 
+        # KD fit (optional) — keep the closure inside the compound loop so
+        # R2_free is captured correctly for each compound.
+        fitted_KD = np.nan
+        fitted_R2b = np.nan
         if fit_KD:
             # Eq. 12:  R2_SL = R2_f + n·[P]_tot·(R2_b − R2_f) / (KD + [L]_f) · [L]_f/[L]_tot
             # Simplified assuming [L]_f ≈ [L]_tot (p_b << 1)
@@ -614,10 +624,34 @@ def workflow_titration(
                     bounds=([0.01, R2_free], [1e5, R2_free * 1000]),
                     maxfev=10000,
                 )
-                KD_fits.append(popt[0])
+                fitted_KD  = popt[0]
+                fitted_R2b = popt[1]
+                KD_fits.append(fitted_KD)
             except RuntimeError:
                 KD_fits.append(np.nan)
                 notes.append(f"KD fit did not converge for {c.name}.")
+
+        # --- Binding isotherm figure ---
+        fig_iso, ax_iso = plt.subplots(figsize=(5, 4))
+        ax_iso.scatter(prot_arr, R2_vals, color="royalblue", zorder=3, label="Data")
+        title_iso = f"{c.name}  |  B = {B:.4g} T"
+        if fit_KD and not np.isnan(fitted_KD):
+            P_dense = np.linspace(prot_arr.min(), prot_arr.max(), 300)
+            R2_fit_dense = titration_eq(P_dense, fitted_KD, fitted_R2b)
+            ax_iso.plot(
+                P_dense, R2_fit_dense, "r-",
+                label=f"Fit: KD = {fitted_KD:.1f} µM, R₂,b = {fitted_R2b:.2f} s⁻¹",
+            )
+        ax_iso.set_xlabel("[Protein] (µM)")
+        ax_iso.set_ylabel("R₂ (s⁻¹)")
+        ax_iso.set_title(title_iso, fontsize=10)
+        ax_iso.legend(fontsize=8)
+        ax_iso.spines[["top", "right"]].set_visible(False)
+        fig_iso.tight_layout()
+        iso_path = basedir / f"titration_isotherm_{_sanitize_dirname(c.name)}.png"
+        fig_iso.savefig(iso_path, dpi=150, bbox_inches="tight")
+        print(f"[plot] Saved binding isotherm to {iso_path}")
+        plt.close(fig_iso)
 
     slopes_arr = np.array(slopes)
     s_max = slopes_arr.max() if slopes_arr.max() > 0 else 1.0
@@ -647,7 +681,8 @@ def workflow_titration(
 # Visualisation
 # ============================================================================
 
-def plot_ranking(result: WorkflowResult, output_path: Optional[str] = None) -> None:
+def plot_ranking(result: WorkflowResult, output_path: Optional[str] = None,
+                 protein_concentration: Optional[float] = None) -> None:
     """
     Bar chart of affinity ranking from any workflow result.
 
@@ -656,6 +691,9 @@ def plot_ranking(result: WorkflowResult, output_path: Optional[str] = None) -> N
     result : WorkflowResult
     output_path : str, optional
         If given, save figure to this path instead of displaying.
+    protein_concentration : float, optional
+        Protein concentration in µM for ``csar``/``fastcsar`` workflows;
+        included in the figure title when provided.
     """
     n = len(result.compound_names)
     order = np.argsort(result.scores)[::-1]
@@ -702,7 +740,10 @@ def plot_ranking(result: WorkflowResult, output_path: Optional[str] = None) -> N
     ax.set_xticks(range(n))
     ax.set_xticklabels(names_sorted, rotation=40, ha="right", fontsize=9)
     ax.set_ylabel("Relative affinity (normalised score)", fontsize=9)
-    ax.set_title(f"{result.workflow} affinity ranking", fontsize=11, fontweight="bold")
+    title = f"{result.workflow} affinity ranking"
+    if protein_concentration is not None:
+        title += f"  ([Protein] = {protein_concentration:.6g} µM)"
+    ax.set_title(title, fontsize=11, fontweight="bold")
     ax.yaxis.set_major_formatter(ticker.PercentFormatter(xmax=1))
     ax.set_ylim(0, 1.15)
     ax.spines[["top", "right"]].set_visible(False)
@@ -842,16 +883,30 @@ def _sanitize_dirname(name: str) -> str:
     return safe or "protein"
 
 
-def _basedir(protein_name: Optional[str]) -> Path:
+def _format_conc_dir(conc: float) -> str:
+    """
+    Format a protein concentration (µM) into a filesystem-safe directory
+    name fragment, e.g. ``10.0 → '10uM'``, ``10.5 → '10p5uM'``.
+
+    Must produce the *identical* string as ``populate_config.py``'s own
+    ``_format_conc_dir`` — both helpers are kept in sync deliberately.
+    """
+    return f"{conc:g}".replace(".", "p") + "uM"
+
+
+def _basedir(protein_name: Optional[str], protein_concentration: Optional[float] = None) -> Path:
     """
     Return the ``fit_results`` directory to save the ranking plot into,
-    namespaced by protein name when one is known — mirrors
+    namespaced by protein name when one is known, and further by protein
+    concentration for ``csar``/``fastcsar`` workflows — mirrors
     ``populate_config.py``'s ``_basedir`` exactly (see its docstring).
     Creates the directory if it doesn't exist yet.
     """
     basedir = Path("fit_results")
     if protein_name:
         basedir = basedir / _sanitize_dirname(protein_name)
+    if protein_concentration is not None:
+        basedir = basedir / _format_conc_dir(protein_concentration)
     basedir.mkdir(parents=True, exist_ok=True)
     return basedir
 
@@ -879,6 +934,13 @@ def run_from_config(config_path: str) -> WorkflowResult:
     MW_kDa       = float(wf_cfg.get("protein_MW_kDa", 23.0))
     plot_out     = wf_cfg.get("plot_output", None)
     protein_name = wf_cfg.get("protein_name", None)
+    # Protein concentration for csar/fastcsar — embedded in the output
+    # directory name and used for figure titles.  None for other workflows.
+    protein_concentration: Optional[float] = (
+        float(wf_cfg["protein_concentration"])
+        if wf_name in ("csar", "fastcsar") and "protein_concentration" in wf_cfg
+        else None
+    )
 
     compounds = [
         _parse_compound(name, comp_cfg)
@@ -913,6 +975,7 @@ def run_from_config(config_path: str) -> WorkflowResult:
         result    = workflow_titration(
             compounds, B, prot_conc, lig_conc, tau_c, nucleus,
             fit_KD=fit_KD,
+            protein_name=protein_name,
         )
 
     else:
@@ -926,10 +989,10 @@ def run_from_config(config_path: str) -> WorkflowResult:
         # {protein_name}/ figures rather than wherever the process
         # happens to be running from — same directory, same naming
         # convention, one place to look for every plot from this run.
-        plot_out = _basedir(protein_name) / Path(plot_out).name
-        plot_ranking(result, output_path=plot_out)
+        plot_out = _basedir(protein_name, protein_concentration) / Path(plot_out).name
+        plot_ranking(result, output_path=plot_out, protein_concentration=protein_concentration)
     else:
-        plot_ranking(result)
+        plot_ranking(result, protein_concentration=protein_concentration)
 
     return result
 
@@ -946,13 +1009,14 @@ EXAMPLE_TOML = """\
 # ============================================================
 
 [workflow]
-name             = "csar"          # workflow to run
-nucleus          = "19F"           # observed nucleus
-tau_c            = 1.0e-8          # rotational correlation time of complex (s)
-protein_MW_kDa   = 23.0            # protein MW for RDD rule-of-thumb
-B_high           = 16.4            # Tesla  (700 MHz 1H)
-B_low            = 11.75           # Tesla  (500 MHz 1H)
-plot_output      = "ranking.png"   # omit to display interactively
+name                 = "csar"          # workflow to run
+nucleus              = "19F"           # observed nucleus
+tau_c                = 1.0e-8          # rotational correlation time of complex (s)
+protein_MW_kDa       = 23.0            # protein MW for RDD rule-of-thumb
+B_high               = 16.4            # Tesla  (700 MHz 1H)
+B_low                = 11.75           # Tesla  (500 MHz 1H)
+protein_concentration = 50.0           # µM — used for output directory naming and figure titles
+plot_output          = "ranking.png"   # omit to display interactively
 
 # ------------------------------------------------------------
 # Define one [compound.NAME] block per ligand, with a nested
@@ -995,14 +1059,15 @@ eta           = 1.03
 # FastCSAR example — replace the [workflow] block above with:
 # ============================================================
 # [workflow]
-# name           = "fastcsar"
-# nucleus        = "19F"
-# tau_c          = 1.0e-8
-# protein_MW_kDa = 23.0
-# B              = 16.4
-# t_short        = 0.005    # 5 ms
-# t_long         = 0.200    # 200 ms (CF3) or 0.100 for CF
-# plot_output    = "ranking_fast.png"
+# name                  = "fastcsar"
+# nucleus               = "19F"
+# tau_c                 = 1.0e-8
+# protein_MW_kDa        = 23.0
+# B                     = 16.4
+# t_short               = 0.005    # 5 ms
+# t_long                = 0.200    # 200 ms (CF3) or 0.100 for CF
+# protein_concentration = 50.0     # µM — used for output directory naming and figure titles
+# plot_output           = "ranking_fast.png"
 #
 # Compounds need only a single-field R2 entry:
 # [compound.compound_1.R2]
