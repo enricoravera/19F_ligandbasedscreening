@@ -1,0 +1,127 @@
+\documentclass[11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\geometry{a4paper, margin=1in}
+\title{Calculation of the van der Waals Interaction Integral for an Infinite Flat Surface and for the Full Packing of \textsuperscript{19}F-Surrounding Protons}
+\author{Letizia Fiorucci, Enrico Ravera}
+\date{}
+\begin{document}
+\maketitle
+\section{Problem Statement}
+To refine the ranking of affinities of fragments, several methods have been proposed. For the sake of the discussion, we will restrain this discussion to the CSAR/FastCSAR method by Gossert and co-workers. In their original manuscript, the authors note that the dipolar contribution to relaxation is not readily accessible: the dipolar contribution of any nucleus of a molecule interacting with a protein can only be estimated correctly if the binding pose is known. However, at the stage of the screening of a large library, when one needs to estimate whether an interaction is occurring, the pose in which the interaction occurs is not yet known. The obvious choice is to simulate the binding pose with state of the art docking algorithms, but this is not necessarily obvious in the case of very large libraries. One quick workaround might be offered by considering the worst-case scenario, i.e.: to obtain a safe upper bound to the dipolar contribution. In this report, we approach the problem in two complementary ways:
+
+\begin{enumerate}
+  \item an idealized \emph{mean-field flat-surface} model, in which the protein surface is treated as an infinite plane carrying a uniform hydrogen areal density $\sigma_0$;
+  \item a \emph{packed-surface} model, in which hydrogen atoms are packed at hard-sphere contact directly onto the true (curved, finite) accessible surface of an actual small-molecule structure, either at the maximum density the geometry allows or capped at a prescribed areal density $\sigma_0$.
+\end{enumerate}
+
+For both approaches we compute $\Sigma_i\, 1/r_i^6$, the quantity that enters the dipolar relaxation rate $R_{2,\mathrm{DD}}$ in place of the (unknown) sum over the real, disordered protein protons surrounding the observed nucleus.
+
+\section{Model 1: Infinite Flat Surface (Mean-Field)}
+\subsection{Geometric Setup}
+We define the surface as the $xy$-plane. The atom $X$ is placed on the $z$-axis at a height $z$ above the plane. The shortest distance from the center of atom $X$ to the plane containing the centers of the hydrogen atoms is the sum of their van der Waals radii:
+\begin{equation}
+z = R_H + R_X = 1.2 + R_X \text{ (\AA)}
+\end{equation}
+For any hydrogen atom on the surface at a radial distance $\rho$ from the origin (the projection of $X$ onto the plane), the distance $r$ between $X$ and that hydrogen atom is:
+\begin{equation}
+r = \sqrt{\rho^2 + z^2}
+\end{equation}
+
+\subsection{Integration over the Surface}
+The total contribution $I$ is the integral of $1/r^6$ weighted by the surface density $\sigma_0$. Using polar coordinates $dA = 2\pi \rho \, d\rho$:
+\begin{equation}
+I = \int_{0}^{\infty} \frac{\sigma_0}{r^6} (2\pi \rho \, d\rho) = 2\pi \sigma_0 \int_{0}^{\infty} \frac{\rho}{(\rho^2 + z^2)^3} d\rho
+\end{equation}
+To solve the integral, we use the substitution $u = \rho^2 + z^2$, hence $du = 2\rho \, d\rho$:
+\begin{equation}
+I = \pi \sigma_0 \int_{z^2}^{\infty} u^{-3} du
+\end{equation}
+Evaluating the integral:
+\begin{equation}
+I = \pi \sigma_0 \left[ -\frac{1}{2u^2} \right]_{z^2}^{\infty} = \pi \sigma_0 \left( 0 - \left( -\frac{1}{2z^4} \right) \right) = \frac{\pi \sigma_0}{2z^4}
+\end{equation}
+
+\subsection{Mean-Field Result}
+Substituting the value adopted in the original treatment, $\sigma_0 = 10^{-2} \text{ \AA}^{-2}$, and the expression for $z$:
+\begin{equation}
+I = \frac{\pi \times 10^{-2}}{2(1.2 + R_X)^4} = \frac{\pi}{200(1.2 + R_X)^4} \text{ \AA}^{-6}
+\end{equation}
+For the nucleus of interest, $^{19}$F, with $R_X = R_F = 1.47$~\AA\ (Bondi/Alvarez van der Waals radius), this gives $z = 2.67$~\AA\ and
+\begin{equation}
+I_{\mathrm{flat}}(\sigma_0 = 10^{-2}~\text{\AA}^{-2}) = 3.09 \times 10^{-4} \text{ \AA}^{-6}, \qquad r_{\mathrm{eff}} = I^{-1/6} = 3.85 \text{ \AA}.
+\end{equation}
+
+\subsection{Structurally-Derived Surface Density}
+The value $\sigma_0 = 10^{-2}~\text{\AA}^{-2}$ used above is a mean-field estimate and not a measurement. As a data-driven check, we estimated the areal density of \emph{solvent-exposed} hydrogen atoms directly from a real protein structure (PDB 8AWW, transthyretin, both chains, protonated with standard bond-length/angle geometry and classified as exposed or buried via a Shrake--Rupley solvent-accessible-surface test with a 1.4~\AA\ water probe). This gave
+\begin{equation}
+\sigma_0^{\mathrm{struct}} = \frac{N_{\mathrm{exposed\ H}}}{\mathrm{SASA}_{\mathrm{heavy\ atoms}}} \approx 6.2 \times 10^{-2} \text{ \AA}^{-2},
+\end{equation}
+approximately $6.2\times$ the mean-field value, obtained from 694 solvent-exposed hydrogens out of 1703 placed (40.8\% exposed) over a total heavy-atom SASA of $1.12\times10^4$~\AA$^2$. Re-evaluating Eq.~(6) with this structural density at $R_X = R_F$ gives
+\begin{equation}
+I_{\mathrm{flat}}(\sigma_0^{\mathrm{struct}} = 6.2\times10^{-2}~\text{\AA}^{-2}) = 1.92\times10^{-3}~\text{\AA}^{-6}, \qquad r_{\mathrm{eff}} = 3.10~\text{\AA}.
+\end{equation}
+
+\section{Model 2: Packed Molecular Surface}
+The flat-surface integral of Section~2 is a mean-field idealization: it assumes an infinite, structureless plane with a uniform, non-interacting proton density. Real protons, however, cannot overlap, and a real molecular surface is curved and finite. We therefore construct a second, geometry-resolved estimate directly from an atomistic structure.
+
+\subsection{Accessible Surface and Hard-Sphere Packing}
+Given a small-molecule structure (Cartesian coordinates from an XYZ file), we build the hydrogen-accessible surface as the locus of points at van der Waals contact with the molecule: for every heavy atom, a Fibonacci-lattice sphere of candidate points is generated at radius $R_{\mathrm{atom}} + R_H$, and points buried inside any other atom's contact shell are discarded (a standard rolling-probe/Shrake--Rupley construction with probe radius $R_H = 1.2$~\AA). Hydrogen atoms are then packed onto this accessible surface greedily, starting from the point closest to the fluorine of interest and accepting each subsequent candidate only if it lies at least a hard-sphere exclusion distance from every already-placed hydrogen:
+\begin{equation}
+d_{\mathrm{min}} = \max\!\left(2R_H,\ \sqrt{\dfrac{2}{\sqrt{3}\,\sigma_0^{\mathrm{target}}}}\right),
+\end{equation}
+where the second term (absent, i.e. $2R_H$ only, in the uncapped case) follows from equating $\sigma_0^{\mathrm{target}}$ to the areal density of a two-dimensional hexagonal close-packed lattice of spacing $d_{\mathrm{min}}$. For each accepted hydrogen at distance $r_i$ from the fluorine, we accumulate
+\begin{equation}
+\Sigma_i\, \frac{1}{r_i^6}\ \ (\text{\AA}^{-6}), \qquad r_{\mathrm{eff}} = \left(\Sigma_i\, r_i^{-6}\right)^{-1/6}.
+\end{equation}
+
+\subsection{Maximum Density (Uncapped) Packing}
+With no density cap, hydrogens are packed at the maximum density the hard-sphere geometry allows. On a fluorobenzene test structure, this reaches an empirical areal density of $\sigma_0^{\mathrm{packed}} \approx 0.185~\text{\AA}^{-2}$ (in close agreement with the theoretical two-dimensional hexagonal close-packing limit for spheres of radius $R_H$, $\sigma_{\mathrm{hex}} = \frac{\pi}{2\sqrt{3}R_H^2} \approx 0.200~\text{\AA}^{-2}$), roughly $18$--$19\times$ the mean-field $\sigma_0 = 10^{-2}~\text{\AA}^{-2}$. With 29 hydrogens packed around the fluorine of fluorobenzene:
+\begin{equation}
+\Sigma_i\, r_i^{-6}\big|_{\mathrm{max\ density}} = 2.06\times 10^{-2}~\text{\AA}^{-6}, \qquad r_{\mathrm{eff}} = 1.91~\text{\AA},
+\end{equation}
+a factor of $\sim\!67\times$ larger than the mean-field flat-surface result $I_{\mathrm{flat}}$ of Eq.~(7). Decomposing this ratio: $\sim\!19\times$ is attributable to the packing-density mismatch between $\sigma_0^{\mathrm{packed}}$ and the mean-field $\sigma_0$, and the remaining $\sim\!3.5\times$ to the genuine curvature/finite-size effect of a real, closed molecular surface relative to an infinite plane.
+
+\subsection{Density-Capped Packing}
+To isolate the curvature/finite-size effect from the packing-density effect, the same packed-surface geometry can be re-evaluated with the hydrogen density capped at a prescribed target via Eq.~(9), rather than left at the hard-sphere maximum.
+
+\paragraph{Capped at the mean-field $\sigma_0 = 10^{-2}~\text{\AA}^{-2}$.} Only a single hydrogen site survives on the small fluorobenzene surface at this low target density (minimum separation $10.7$~\AA, larger than the molecule itself), located at the nearest van der Waals contact point:
+\begin{equation}
+\Sigma_i\, r_i^{-6}\big|_{\sigma_0\mathrm{\text{-}capped}} = 2.76\times 10^{-3}~\text{\AA}^{-6}, \qquad r_{\mathrm{eff}} = 2.67~\text{\AA}.
+\end{equation}
+This remains $\sim\!8.9\times$ larger than $I_{\mathrm{flat}}$ even at matched density, since the flat-plane model integrates contributions out to $\rho\to\infty$, whereas the finite molecular surface, even sparsely populated, places its (few) hydrogens preferentially at the closest available contact distance.
+
+\paragraph{Capped at the structural $\sigma_0^{\mathrm{struct}} = 6.2\times10^{-2}~\text{\AA}^{-2}$.} With minimum separation $4.32$~\AA\ (Eq.~9), 10 hydrogens are packed around the fluorobenzene fluorine at an empirical density of $0.0598~\text{\AA}^{-2}$ (matching the $6.2\times10^{-2}~\text{\AA}^{-2}$ target to within discretization):
+\begin{equation}
+\Sigma_i\, r_i^{-6}\big|_{\sigma_0^{\mathrm{struct}}\mathrm{\text{-}capped}} = 7.25\times 10^{-3}~\text{\AA}^{-6}, \qquad r_{\mathrm{eff}} = 2.27~\text{\AA}.
+\end{equation}
+
+\section{Comparison of Models}
+Table~\ref{tab:models} summarizes $\Sigma_i\, r_i^{-6}$, the equivalent single-proton distance $r_{\mathrm{eff}}$, and the corresponding dipolar relaxation rate $R_{2,\mathrm{DD}}$ (computed at $B_0 = 16.4$~T, for a 23~kDa protein with $\tau_c = 13.8$~ns, using the standard heteronuclear dipolar spectral-density expression) for all models discussed above, together with the empirical rule-of-thumb estimate $R_{2,\mathrm{DD}} \approx \mathrm{MW\,[kDa]}~\mathrm{s}^{-1}$ from the original CSAR/FastCSAR treatment.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}llccc@{}}
+\toprule
+& Model & $\Sigma_i\, r_i^{-6}$ (\AA$^{-6}$) & $r_{\mathrm{eff}}$ (\AA) & $R_{2,\mathrm{DD}}$ (s$^{-1}$) \\
+\midrule
+(A) & Rule-of-thumb (MW-based) & --- & --- & 23.0 \\
+(B) & Flat surface, $\sigma_0 = 10^{-2}~\text{\AA}^{-2}$ (mean-field) & $3.09\times10^{-4}$ & 3.85 & 4.39 \\
+(C) & Packed surface, maximum density & $2.06\times10^{-2}$ & 1.91 & 292.1 \\
+(D) & Packed surface, capped at $\sigma_0=10^{-2}~\text{\AA}^{-2}$ & $2.76\times10^{-3}$ & 2.67 & 39.2 \\
+(E) & Flat surface, $\sigma_0^{\mathrm{struct}} = 6.2\times10^{-2}~\text{\AA}^{-2}$ & $1.92\times10^{-3}$ & 3.10 & 27.2 \\
+(F) & Packed surface, capped at $\sigma_0^{\mathrm{struct}}$ & $7.25\times10^{-3}$ & 2.27 & 103.0 \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of $\Sigma_i\, r_i^{-6}$, effective single-proton distance, and predicted $R_{2,\mathrm{DD}}$ across all models discussed, for the $^{19}$F nucleus of a fluorobenzene test structure ($B_0 = 16.4$~T, MW $=23$~kDa, $\tau_c = 13.8$~ns).}
+\label{tab:models}
+\end{table}
+
+Two trends emerge. First, going from the mean-field flat surface (B) to the maximum-density packed surface (C) increases the predicted relaxation rate by nearly two orders of magnitude, indicating that the mean-field density $\sigma_0 = 10^{-2}~\text{\AA}^{-2}$ is a substantial underestimate of the true hard-sphere packing limit. Second, using the structurally-measured exposed-proton density $\sigma_0^{\mathrm{struct}}$ in place of the mean-field value — on the same flat-plane geometry (E), or on the packed molecular geometry (F) — moves the estimate closer to (E) or further from (D) the empirical rule-of-thumb (A) than the original mean-field flat model (B), underscoring that both the assumed areal density and the surface geometry (flat vs. packed/curved) materially affect the worst-case dipolar relaxation estimate.
+
+\end{document}
