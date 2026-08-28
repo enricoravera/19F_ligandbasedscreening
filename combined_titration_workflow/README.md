@@ -32,7 +32,8 @@ Each block maps directly to the function arguments in `fitting.py`.
 
 ### Inversion recovery
 - **R1 guess strategy**: single-exponential inversion-recovery approximation
-  - each titration point is first fit to an apparent inversion-recovery decay
+  - each titration point is first fit to the inversion-recovery model `M(t) = M0 (1 - 2 exp(-t / T1)) + C`
+  - the apparent `R1` value is then obtained as `R1 = 1 / T1`
   - the titration model then uses the apparent `R1` values as inputs
 - **Free/bound guess values**: derived from the apparent `R1` values, with the zero-protein point used when available
 - The user can optionally fix `R1_free` and/or `R1_bound` to the guessed values

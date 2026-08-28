@@ -18,9 +18,9 @@ class FitSummary:
 
 
 @dataclass
-class T1FitResult:
-    apparent_t1_values_s: list[float]
-    apparent_t1_errors_s: list[float]
+class R1FitResult:
+    apparent_r1_values_s_inv: list[float]
+    apparent_r1_errors_s_inv: list[float]
     fit: FitSummary
 
 
@@ -244,7 +244,7 @@ def fit_dosy_single_decay(
     )
 
 
-def fit_single_inversion_recovery(delays_s: np.ndarray, intensities: np.ndarray) -> tuple[float, float, bool]:
+def fit_single_inversion_recovery_r1(delays_s: np.ndarray, intensities: np.ndarray) -> tuple[float, float, bool]:
     x = np.asarray(delays_s, dtype=float)
     y = np.asarray(intensities, dtype=float)
 
@@ -261,24 +261,26 @@ def fit_single_inversion_recovery(delays_s: np.ndarray, intensities: np.ndarray)
     params["T1"].set(min=1e-6, max=max(float(np.max(x)) * 100.0, 1e-2))
 
     result = model.fit(y, params, t=x, max_nfev=10000)
-    t1 = float(result.params["T1"].value)
+    t1 = max(float(result.params["T1"].value), 1e-12)
     t1_err = float(result.params["T1"].stderr) if result.params["T1"].stderr is not None else float("nan")
-    return t1, t1_err, bool(result.success)
+    r1 = 1.0 / t1
+    r1_err = float(abs(t1_err) / (t1**2)) if np.isfinite(t1_err) else float("nan")
+    return r1, r1_err, bool(result.success)
 
 
-def fit_t1_inversion_recovery_titration(
+def fit_r1_inversion_recovery_titration(
     protein_concentrations_uM: np.ndarray,
     delays_s: np.ndarray,
     intensity_matrix: np.ndarray,
     ligand_concentration_uM: float,
     *,
-    t1_bound_guess_s: float | None = None,
+    r1_bound_guess_s_inv: float | None = None,
     n_sites: int = 1,
     fit_kd: bool = True,
-    fix_t1_free_to_guess: bool = False,
-    fix_t1_bound_to_guess: bool = False,
+    fix_r1_free_to_guess: bool = False,
+    fix_r1_bound_to_guess: bool = False,
     kd_guess_uM: float = 500.0,
-) -> T1FitResult:
+) -> R1FitResult:
     prot = np.asarray(protein_concentrations_uM, dtype=float)
     x = np.asarray(delays_s, dtype=float)
     y = np.asarray(intensity_matrix, dtype=float)
@@ -290,43 +292,57 @@ def fit_t1_inversion_recovery_titration(
     if y.shape[1] != x.shape[0]:
         raise ValueError("intensity_matrix column count must match delays_s length")
 
-    t1_vals, t1_errs = [], []
+    r1_vals, r1_errs = [], []
     for row in y:
-        t1_i, err_i, _ = fit_single_inversion_recovery(x, row)
-        t1_vals.append(t1_i)
-        t1_errs.append(err_i)
+        r1_i, err_i, _ = fit_single_inversion_recovery_r1(x, row)
+        r1_vals.append(r1_i)
+        r1_errs.append(err_i)
 
-    t1_arr = np.asarray(t1_vals, dtype=float)
-    t1_err_arr = np.asarray(t1_errs, dtype=float)
+    r1_arr = np.asarray(r1_vals, dtype=float)
+    r1_err_arr = np.asarray(r1_errs, dtype=float)
 
-    t1_free_guess = t1_arr[0] if np.isclose(prot[0], 0.0) else float(np.max(t1_arr))
-    t1_bound_guess = float(t1_bound_guess_s) if t1_bound_guess_s is not None else float(np.min(t1_arr))
+    r1_free_guess = r1_arr[0] if np.isclose(prot[0], 0.0) else float(np.min(r1_arr))
+    r1_bound_guess = (
+        float(r1_bound_guess_s_inv)
+        if r1_bound_guess_s_inv is not None
+        else float(np.max(r1_arr))
+    )
 
-    def t1_model(P_tot: np.ndarray, KD: float, T1_free: float, T1_bound: float) -> np.ndarray:
+    def r1_model(P_tot: np.ndarray, KD: float, R1_free: float, R1_bound: float) -> np.ndarray:
         frac = _bound_fraction(P_tot, KD, ligand_concentration_uM, n_sites=n_sites)
-        r1_free = 1.0 / np.clip(T1_free, 1e-12, None)
-        r1_bound = 1.0 / np.clip(T1_bound, 1e-12, None)
-        r1_app = r1_free + frac * (r1_bound - r1_free)
-        return 1.0 / np.clip(r1_app, 1e-12, None)
+        return R1_free + frac * (R1_bound - R1_free)
 
-    model = lmfit.Model(t1_model, independent_vars=["P_tot"])
-    params = model.make_params(KD=kd_guess_uM, T1_free=t1_free_guess, T1_bound=t1_bound_guess)
+    model = lmfit.Model(r1_model, independent_vars=["P_tot"])
+    params = model.make_params(KD=kd_guess_uM, R1_free=r1_free_guess, R1_bound=r1_bound_guess)
     params["KD"].set(min=1e-3, max=1e6, vary=fit_kd)
 
-    if fix_t1_free_to_guess:
-        params["T1_free"].set(value=t1_free_guess, vary=False)
+    if fix_r1_free_to_guess:
+        params["R1_free"].set(value=r1_free_guess, vary=False)
     else:
-        params["T1_free"].set(value=t1_free_guess, min=1e-6, max=max(t1_free_guess * 10.0, 1e-3), vary=True)
-    if fix_t1_bound_to_guess:
-        params["T1_bound"].set(value=t1_bound_guess, vary=False)
+        params["R1_free"].set(
+            value=r1_free_guess,
+            min=min(r1_free_guess * 0.1, 1e-6),
+            max=max(r1_free_guess * 10.0, 1.0),
+            vary=True,
+        )
+    if fix_r1_bound_to_guess:
+        params["R1_bound"].set(value=r1_bound_guess, vary=False)
     else:
-        params["T1_bound"].set(value=t1_bound_guess, min=1e-6, max=max(t1_bound_guess * 10.0, 1e-3), vary=True)
+        params["R1_bound"].set(
+            value=r1_bound_guess,
+            min=min(r1_bound_guess * 0.1, 1e-6),
+            max=max(r1_bound_guess * 10.0, 1.0),
+            vary=True,
+        )
 
     weights = None
-    if np.all(np.isfinite(t1_err_arr)) and np.all(t1_err_arr > 0):
-        weights = 1.0 / t1_err_arr
+    if np.all(np.isfinite(r1_err_arr)) and np.all(r1_err_arr > 0):
+        # lmfit expects residual-multiplying weights, so inverse-sigma weighting is appropriate here.
+        candidate_weights = 1.0 / r1_err_arr
+        if np.all(np.isfinite(candidate_weights)) and np.any(candidate_weights > 0):
+            weights = candidate_weights
 
-    result = model.fit(t1_arr, params, P_tot=prot, weights=weights, max_nfev=10000)
+    result = model.fit(r1_arr, params, P_tot=prot, weights=weights, max_nfev=10000)
 
     fit_summary = FitSummary(
         success=bool(result.success),
@@ -334,14 +350,14 @@ def fit_t1_inversion_recovery_titration(
         best_values={k: float(v) for k, v in result.best_values.items()},
         stderr=_stderr_map(result),
         guesses={
-            "T1_free_guess": float(t1_free_guess),
-            "T1_bound_guess": float(t1_bound_guess),
+            "R1_free_guess": float(r1_free_guess),
+            "R1_bound_guess": float(r1_bound_guess),
             "KD_guess": float(kd_guess_uM),
         },
     )
-    return T1FitResult(
-        apparent_t1_values_s=t1_arr.tolist(),
-        apparent_t1_errors_s=t1_err_arr.tolist(),
+    return R1FitResult(
+        apparent_r1_values_s_inv=r1_arr.tolist(),
+        apparent_r1_errors_s_inv=r1_err_arr.tolist(),
         fit=fit_summary,
     )
 
@@ -391,19 +407,21 @@ def run_combined_workflow(config: dict[str, Any]) -> dict[str, Any]:
             kd_guess_uM=float(dosy.get("kd_guess_uM", 500.0)),
         )
 
-    if "t1" in config:
-        t1 = config["t1"]
-        out["t1"] = fit_t1_inversion_recovery_titration(
-            protein_concentrations_uM=np.asarray(t1["protein_concentrations_uM"], dtype=float),
-            delays_s=np.asarray(t1["delays_s"], dtype=float),
-            intensity_matrix=np.asarray(t1["intensity_matrix"], dtype=float),
-            ligand_concentration_uM=float(t1["ligand_concentration_uM"]),
-            t1_bound_guess_s=(None if t1.get("t1_bound_guess_s") is None else float(t1["t1_bound_guess_s"])),
-            n_sites=int(t1.get("n_sites", 1)),
-            fit_kd=bool(t1.get("fit_kd", True)),
-            fix_t1_free_to_guess=bool(t1.get("fix_t1_free_to_guess", False)),
-            fix_t1_bound_to_guess=bool(t1.get("fix_t1_bound_to_guess", False)),
-            kd_guess_uM=float(t1.get("kd_guess_uM", 500.0)),
+    if "r1" in config:
+        r1 = config["r1"]
+        out["r1"] = fit_r1_inversion_recovery_titration(
+            protein_concentrations_uM=np.asarray(r1["protein_concentrations_uM"], dtype=float),
+            delays_s=np.asarray(r1["delays_s"], dtype=float),
+            intensity_matrix=np.asarray(r1["intensity_matrix"], dtype=float),
+            ligand_concentration_uM=float(r1["ligand_concentration_uM"]),
+            r1_bound_guess_s_inv=(
+                None if r1.get("r1_bound_guess_s_inv") is None else float(r1["r1_bound_guess_s_inv"])
+            ),
+            n_sites=int(r1.get("n_sites", 1)),
+            fit_kd=bool(r1.get("fit_kd", True)),
+            fix_r1_free_to_guess=bool(r1.get("fix_r1_free_to_guess", False)),
+            fix_r1_bound_to_guess=bool(r1.get("fix_r1_bound_to_guess", False)),
+            kd_guess_uM=float(r1.get("kd_guess_uM", 500.0)),
         )
 
     def _to_jsonable(value: Any) -> Any:
