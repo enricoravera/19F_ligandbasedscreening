@@ -264,7 +264,7 @@ def fit_single_inversion_recovery_r1(delays_s: np.ndarray, intensities: np.ndarr
     t1 = max(float(result.params["T1"].value), 1e-12)
     t1_err = float(result.params["T1"].stderr) if result.params["T1"].stderr is not None else float("nan")
     r1 = 1.0 / t1
-    r1_err = float(t1_err / (t1**2)) if np.isfinite(t1_err) else float("nan")
+    r1_err = float(abs(t1_err) / (t1**2)) if np.isfinite(t1_err) else float("nan")
     return r1, r1_err, bool(result.success)
 
 
@@ -319,15 +319,28 @@ def fit_r1_inversion_recovery_titration(
     if fix_r1_free_to_guess:
         params["R1_free"].set(value=r1_free_guess, vary=False)
     else:
-        params["R1_free"].set(value=r1_free_guess, min=1e-6, max=max(r1_free_guess * 10.0, 1e-3), vary=True)
+        params["R1_free"].set(
+            value=r1_free_guess,
+            min=min(r1_free_guess * 0.1, 1e-6),
+            max=max(r1_free_guess * 10.0, 1.0),
+            vary=True,
+        )
     if fix_r1_bound_to_guess:
         params["R1_bound"].set(value=r1_bound_guess, vary=False)
     else:
-        params["R1_bound"].set(value=r1_bound_guess, min=1e-6, max=max(r1_bound_guess * 10.0, 1e-3), vary=True)
+        params["R1_bound"].set(
+            value=r1_bound_guess,
+            min=min(r1_bound_guess * 0.1, 1e-6),
+            max=max(r1_bound_guess * 10.0, 1.0),
+            vary=True,
+        )
 
     weights = None
     if np.all(np.isfinite(r1_err_arr)) and np.all(r1_err_arr > 0):
-        weights = 1.0 / r1_err_arr
+        # lmfit expects residual-multiplying weights, so inverse-sigma weighting is appropriate here.
+        candidate_weights = 1.0 / r1_err_arr
+        if np.all(np.isfinite(candidate_weights)) and np.any(candidate_weights > 0):
+            weights = candidate_weights
 
     result = model.fit(r1_arr, params, P_tot=prot, weights=weights, max_nfev=10000)
 
