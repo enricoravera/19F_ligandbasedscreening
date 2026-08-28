@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
+import warnings
 
 import lmfit
 import numpy as np
@@ -14,6 +15,13 @@ class FitSummary:
     best_values: dict[str, float]
     stderr: dict[str, float]
     guesses: dict[str, float]
+
+
+@dataclass
+class T1FitResult:
+    apparent_t1_values_s: list[float]
+    apparent_t1_errors_s: list[float]
+    fit: FitSummary
 
 
 _GAMMA_MHZ_PER_T = {
@@ -49,8 +57,15 @@ def r2_csa_bound_guess(
 
 
 def _bound_fraction(P_tot_uM: np.ndarray, KD_uM: float, L_tot_uM: float, n_sites: int = 1) -> np.ndarray:
-    frac = n_sites * P_tot_uM / (KD_uM + L_tot_uM)
-    return np.clip(frac, 0.0, 1.0)
+    if L_tot_uM <= 0:
+        return np.zeros_like(P_tot_uM, dtype=float)
+    p_tot_eff = np.clip(n_sites * np.asarray(P_tot_uM, dtype=float), 0.0, None)
+    kd = max(float(KD_uM), 0.0)
+    term = p_tot_eff + L_tot_uM + kd
+    discr = np.maximum(term**2 - 4.0 * p_tot_eff * L_tot_uM, 0.0)
+    pl = 0.5 * (term - np.sqrt(discr))
+    frac_ligand_bound = pl / L_tot_uM
+    return np.clip(frac_ligand_bound, 0.0, 1.0)
 
 
 def _stderr_map(result: lmfit.model.ModelResult) -> dict[str, float]:
@@ -69,6 +84,7 @@ def fit_cpmg_titration(
     magnetic_field_T: float,
     tau_c_s: float,
     *,
+    nucleus: str = "19F",
     protein_mw_kda: float = 23.0,
     n_sites: int = 1,
     fit_kd: bool = True,
@@ -81,23 +97,27 @@ def fit_cpmg_titration(
     r2_vals = np.asarray(r2_values_s_inv, dtype=float)
 
     r2_free_guess = r2_vals[0] if np.isclose(prot[0], 0.0) else float(np.min(r2_vals))
+    # Same FASTCSAR/titration rule-of-thumb used in the repository:
+    # R2,DD,b (s^-1) ≈ protein molecular weight (kDa).
     r2_dd_guess = float(protein_mw_kda)
-    r2_csa_guess = r2_csa_bound_guess(delta_sigma_ppm, eta, magnetic_field_T, tau_c_s, "19F")
+    r2_csa_guess = r2_csa_bound_guess(delta_sigma_ppm, eta, magnetic_field_T, tau_c_s, nucleus)
     r2b_guess = r2_dd_guess + r2_csa_guess
+    r2_b_value = max(r2b_guess, r2_free_guess * 1.01)
 
     def cpmg_model(P_tot: np.ndarray, KD: float, R2_b: float, R2_free: float) -> np.ndarray:
         frac = _bound_fraction(P_tot, KD, ligand_concentration_uM, n_sites=n_sites)
         return R2_free + frac * (R2_b - R2_free)
 
     model = lmfit.Model(cpmg_model, independent_vars=["P_tot"])
-    params = model.make_params(KD=kd_guess_uM, R2_b=max(r2b_guess, r2_free_guess * 1.01), R2_free=r2_free_guess)
+    params = model.make_params(KD=kd_guess_uM, R2_b=r2_b_value, R2_free=r2_free_guess)
 
     params["KD"].set(min=1e-3, max=1e6, vary=fit_kd)
 
     r2_b_upper = max(r2b_guess * 5.0, float(np.max(r2_vals)) * 20.0, r2_free_guess * 1.10)
-    params["R2_b"].set(min=r2_free_guess * (1.0 + 1e-9), max=r2_b_upper, vary=not fix_r2b_to_guess)
     if fix_r2b_to_guess:
-        params["R2_b"].set(value=max(r2b_guess, r2_free_guess * 1.01), vary=False)
+        params["R2_b"].set(value=r2_b_value, vary=False)
+    else:
+        params["R2_b"].set(value=r2_b_value, min=r2_free_guess * (1.0 + 1e-9), max=r2_b_upper, vary=True)
 
     if fit_r2free:
         params["R2_free"].set(
@@ -168,8 +188,15 @@ def fit_dosy_single_decay(
     if intensities.shape[1] != bvals.shape[0]:
         raise ValueError("intensity_matrix column count must match b_values_s_m2 length")
 
-    row0 = np.clip(intensities[:, [0]], 1e-12, None)
+    b0_idx = int(np.argmin(bvals))
+    row0 = np.clip(intensities[:, [b0_idx]], 1e-12, None)
     ynorm = intensities / row0
+    b_ref = float(bvals[b0_idx])
+    if not np.isclose(b_ref, 0.0):
+        warnings.warn(
+            f"DOSY normalization reference b={b_ref:.6g} (not zero); "
+            "model assumes single-exponential decay relative to this point."
+        )
 
     d_free_guess = stokes_einstein_diffusion_guess(
         free_radius_nm,
@@ -182,23 +209,28 @@ def fit_dosy_single_decay(
         viscosity_pa_s=viscosity_pa_s,
     )
 
+    y_flat = ynorm.ravel()
+    p_grid = np.repeat(prot, bvals.size)
+    b_grid = np.tile(bvals, prot.size)
+
     def dosy_model(b: np.ndarray, P_tot: np.ndarray, KD: float, D_free: float, D_bound: float) -> np.ndarray:
-        frac = _bound_fraction(P_tot[:, None], KD, ligand_concentration_uM, n_sites=n_sites)
+        frac = _bound_fraction(P_tot, KD, ligand_concentration_uM, n_sites=n_sites)
         d_app = D_free + frac * (D_bound - D_free)
-        return np.exp(-b[None, :] * d_app)
+        return np.exp(-(b - b_ref) * d_app)
 
     model = lmfit.Model(dosy_model, independent_vars=["b", "P_tot"])
     params = model.make_params(KD=kd_guess_uM, D_free=d_free_guess, D_bound=d_bound_guess)
     params["KD"].set(min=1e-3, max=1e6, vary=fit_kd)
-    params["D_free"].set(min=1e-14, max=1e-7, vary=not fix_d_free_to_guess)
-    params["D_bound"].set(min=1e-14, max=1e-7, vary=not fix_d_bound_to_guess)
-
     if fix_d_free_to_guess:
         params["D_free"].set(value=d_free_guess, vary=False)
+    else:
+        params["D_free"].set(value=d_free_guess, min=1e-14, max=1e-7, vary=True)
     if fix_d_bound_to_guess:
         params["D_bound"].set(value=d_bound_guess, vary=False)
+    else:
+        params["D_bound"].set(value=d_bound_guess, min=1e-14, max=1e-7, vary=True)
 
-    result = model.fit(ynorm, params, b=bvals, P_tot=prot, max_nfev=10000)
+    result = model.fit(y_flat, params, b=b_grid, P_tot=p_grid, max_nfev=10000)
     return FitSummary(
         success=bool(result.success),
         message=result.message,
@@ -246,7 +278,7 @@ def fit_t1_inversion_recovery_titration(
     fix_t1_free_to_guess: bool = False,
     fix_t1_bound_to_guess: bool = False,
     kd_guess_uM: float = 500.0,
-) -> dict[str, Any]:
+) -> T1FitResult:
     prot = np.asarray(protein_concentrations_uM, dtype=float)
     x = np.asarray(delays_s, dtype=float)
     y = np.asarray(intensity_matrix, dtype=float)
@@ -268,22 +300,27 @@ def fit_t1_inversion_recovery_titration(
     t1_err_arr = np.asarray(t1_errs, dtype=float)
 
     t1_free_guess = t1_arr[0] if np.isclose(prot[0], 0.0) else float(np.max(t1_arr))
-    t1_bound_guess = float(t1_bound_guess_s) if t1_bound_guess_s is not None else float(np.median(t1_arr))
+    t1_bound_guess = float(t1_bound_guess_s) if t1_bound_guess_s is not None else float(np.min(t1_arr))
 
     def t1_model(P_tot: np.ndarray, KD: float, T1_free: float, T1_bound: float) -> np.ndarray:
         frac = _bound_fraction(P_tot, KD, ligand_concentration_uM, n_sites=n_sites)
-        return T1_free + frac * (T1_bound - T1_free)
+        r1_free = 1.0 / np.clip(T1_free, 1e-12, None)
+        r1_bound = 1.0 / np.clip(T1_bound, 1e-12, None)
+        r1_app = r1_free + frac * (r1_bound - r1_free)
+        return 1.0 / np.clip(r1_app, 1e-12, None)
 
     model = lmfit.Model(t1_model, independent_vars=["P_tot"])
     params = model.make_params(KD=kd_guess_uM, T1_free=t1_free_guess, T1_bound=t1_bound_guess)
     params["KD"].set(min=1e-3, max=1e6, vary=fit_kd)
-    params["T1_free"].set(min=1e-6, max=max(t1_free_guess * 10.0, 1e-3), vary=not fix_t1_free_to_guess)
-    params["T1_bound"].set(min=1e-6, max=max(t1_bound_guess * 10.0, 1e-3), vary=not fix_t1_bound_to_guess)
 
     if fix_t1_free_to_guess:
         params["T1_free"].set(value=t1_free_guess, vary=False)
+    else:
+        params["T1_free"].set(value=t1_free_guess, min=1e-6, max=max(t1_free_guess * 10.0, 1e-3), vary=True)
     if fix_t1_bound_to_guess:
         params["T1_bound"].set(value=t1_bound_guess, vary=False)
+    else:
+        params["T1_bound"].set(value=t1_bound_guess, min=1e-6, max=max(t1_bound_guess * 10.0, 1e-3), vary=True)
 
     weights = None
     if np.all(np.isfinite(t1_err_arr)) and np.all(t1_err_arr > 0):
@@ -302,11 +339,11 @@ def fit_t1_inversion_recovery_titration(
             "KD_guess": float(kd_guess_uM),
         },
     )
-    return {
-        "apparent_t1_values_s": t1_arr.tolist(),
-        "apparent_t1_errors_s": t1_err_arr.tolist(),
-        "fit": fit_summary,
-    }
+    return T1FitResult(
+        apparent_t1_values_s=t1_arr.tolist(),
+        apparent_t1_errors_s=t1_err_arr.tolist(),
+        fit=fit_summary,
+    )
 
 
 def run_combined_workflow(config: dict[str, Any]) -> dict[str, Any]:
@@ -322,6 +359,7 @@ def run_combined_workflow(config: dict[str, Any]) -> dict[str, Any]:
             eta=float(cpmg["eta"]),
             magnetic_field_T=float(cpmg["magnetic_field_T"]),
             tau_c_s=float(cpmg["tau_c_s"]),
+            nucleus=str(cpmg.get("nucleus", "19F")),
             protein_mw_kda=float(cpmg.get("protein_mw_kda", 23.0)),
             n_sites=int(cpmg.get("n_sites", 1)),
             fit_kd=bool(cpmg.get("fit_kd", True)),
@@ -369,14 +407,8 @@ def run_combined_workflow(config: dict[str, Any]) -> dict[str, Any]:
         )
 
     def _to_jsonable(value: Any) -> Any:
-        if isinstance(value, FitSummary):
-            return {
-                "success": value.success,
-                "message": value.message,
-                "best_values": value.best_values,
-                "stderr": value.stderr,
-                "guesses": value.guesses,
-            }
+        if is_dataclass(value):
+            return {k: _to_jsonable(v) for k, v in asdict(value).items()}
         if isinstance(value, dict):
             return {k: _to_jsonable(v) for k, v in value.items()}
         if isinstance(value, list):

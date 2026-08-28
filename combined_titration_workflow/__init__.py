@@ -1,5 +1,6 @@
 from .fitting import (
     FitSummary,
+    T1FitResult,
     fit_cpmg_titration,
     fit_dosy_single_decay,
     fit_single_inversion_recovery,
@@ -11,6 +12,7 @@ from .fitting import (
 
 __all__ = [
     "FitSummary",
+    "T1FitResult",
     "fit_cpmg_titration",
     "fit_dosy_single_decay",
     "fit_single_inversion_recovery",
