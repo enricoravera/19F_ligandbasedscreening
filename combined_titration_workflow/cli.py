@@ -9,7 +9,7 @@ from .fitting import run_combined_workflow
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run combined CPMG + DOSY + inversion recovery T1 titration fitting workflow."
+        description="Run combined CPMG + DOSY + inversion recovery R1 titration fitting workflow."
     )
     parser.add_argument("input_json", type=Path, help="Path to workflow input JSON file")
     parser.add_argument(
